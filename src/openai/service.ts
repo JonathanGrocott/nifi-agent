@@ -126,15 +126,42 @@ export class OpenAIService {
         analysis: ETLAnalysis,
         collectedParams: Record<string, string>
     ): Promise<AgentResponse> {
-        const refinementPrompt = `All required parameters have been collected. Please create the NiFi flow.
+        const refinementPrompt = `All required parameters have been collected. Create the NiFi flow now.
 
 Original analysis:
 ${JSON.stringify(analysis, null, 2)}
 
-Collected parameters:
+User-provided parameter values:
 ${JSON.stringify(collectedParams, null, 2)}
 
-Please call create_nifi_flow with the complete processor configurations using these parameter values.`;
+CRITICAL: When calling create_nifi_flow, you MUST:
+1. Map parameter values to EXACT NiFi property names in each processor's "properties" object
+2. For PublishMQTT, use these exact property names:
+   - "Broker URI" (not "broker_uri" or "mqtt_broker")
+   - "Topic" (not "topic" or "mqtt_topic")
+   - "Quality of Service" (optional, default is "1")
+3. For ConsumeMQTT, use:
+   - "Broker URI"
+   - "Topic Filter"
+4. For GenerateFlowFile, use:
+   - "Custom Text" for the message content
+   - "Data Format" set to "Text"
+5. For ExecuteSQL, use:
+   - "Database Connection Pooling Service"
+   - "SQL select query"
+
+Example of correct processor config:
+{
+  "name": "Publish to MQTT",
+  "type": "PublishMQTT",
+  "properties": {
+    "Broker URI": "tcp://localhost:1883",
+    "Topic": "my/topic",
+    "Quality of Service": "1"
+  }
+}
+
+Now call create_nifi_flow with the full configuration, ensuring ALL collected parameter values are properly mapped to processor properties.`;
 
         return this.processMessage(refinementPrompt, collectedParams);
     }

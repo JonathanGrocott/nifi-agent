@@ -72,11 +72,23 @@ export class FlowBuilder {
             }
 
             // Step 2: Create processors
+            // First, find the rightmost position of existing processors to avoid overlap
+            const existingFlow = await this.client.getProcessGroupFlow(rootGroupId);
+            const existingProcessors = existingFlow.processGroupFlow.flow.processors || [];
+            let startX = 100;
+            const startY = 100;
+            const spacingY = 200;
+            const spacingX = 450;
+
+            if (existingProcessors.length > 0) {
+                // Find the rightmost X position
+                const maxX = Math.max(...existingProcessors.map(p => p.component.position?.x || 0));
+                startX = maxX + spacingX;
+                console.log(chalk.gray(`  Positioning new flow at x=${startX} (offset from existing processors)`));
+            }
+
             const processorIdMap: Record<number, string> = {};
             const processorVersionMap: Record<number, number> = {};
-            const startX = 100;
-            const startY = 100;
-            const spacingY = 150;
 
             for (let i = 0; i < definition.processors.length; i++) {
                 const procDef = definition.processors[i];
@@ -84,7 +96,7 @@ export class FlowBuilder {
 
                 const procInfo = processorCatalog[procDef.type];
                 const processorType = procInfo?.type || procDef.type;
-                const bundle = procInfo?.bundle;
+                // Don't pass bundle - let NiFi auto-detect from processor type
 
                 // Calculate position
                 const position = { x: startX, y: startY + i * spacingY };
@@ -94,17 +106,54 @@ export class FlowBuilder {
                         rootGroupId,
                         procDef.name,
                         processorType,
-                        position,
-                        bundle
+                        position
+                        // No bundle - NiFi will find it automatically
                     );
                     const processorId = processor.component.id!;
                     processorIdMap[i] = processorId;
                     processorVersionMap[i] = processor.revision.version;
                     result.processorIds.push(processorId);
-                    console.log(chalk.green(`  ✓ Created: ${procDef.name}`));
+                    console.log(chalk.green(`  ✓ Created: ${procDef.name} (id: ${processorId})`));
 
-                    // Update processor properties
-                    const properties: Record<string, string | null> = { ...procDef.properties };
+                    // Merge default properties from catalog with provided properties
+                    const defaultProps = procInfo?.defaultProperties || {};
+                    const properties: Record<string, string | null> = {
+                        ...defaultProps,  // Defaults first
+                        ...procDef.properties  // Provided properties override defaults
+                    };
+
+                    // Add required properties for specific processors
+                    if (processorType.includes('PublishMQTT')) {
+                        if (!properties['Retain Message']) properties['Retain Message'] = 'false';
+                        if (!properties['Quality of Service']) properties['Quality of Service'] = '1';
+                    }
+                    if (processorType.includes('ConsumeMQTT')) {
+                        if (!properties['Quality of Service']) properties['Quality of Service'] = '1';
+                    }
+                    if (processorType.includes('GenerateFlowFile')) {
+                        // Ensure there's actual content to validate
+                        if (!properties['Custom Text']) {
+                            // Fix escaping for Expression Language
+                            properties['Custom Text'] = `{
+  "timestamp": "\${now():format('yyyy-MM-dd HH:mm:ss')}",
+  "message": "Test data from NiFi Agent",
+  "uuid": "\${UUID()}"
+}`;
+                        }
+                        // Set data format to Text when using Custom Text
+                        if (!properties['Data Format']) properties['Data Format'] = 'Text';
+                    }
+
+                    // Auto-terminate relationships for leaf processors (like PublishMQTT) if not connected
+                    // We'll check this by seeing if this processor is a source in any connection
+                    const isSource = definition.connections.some(c => c.from_index === i);
+
+                    if (!isSource && processorType.includes('PublishMQTT')) {
+                        // If it's a sink (not a source), auto-terminate success and failure
+                        if (!procDef.auto_terminate) procDef.auto_terminate = [];
+                        if (!procDef.auto_terminate.includes('success')) procDef.auto_terminate.push('success');
+                        if (!procDef.auto_terminate.includes('failure')) procDef.auto_terminate.push('failure');
+                    }
 
                     // Replace controller service references with IDs
                     if (definition.controller_services) {
@@ -121,13 +170,35 @@ export class FlowBuilder {
                     }
 
                     if (Object.keys(properties).length > 0) {
-                        const updated = await this.client.updateProcessorProperties(
-                            processorId,
-                            properties,
-                            processorVersionMap[i]
-                        );
-                        processorVersionMap[i] = updated.revision.version;
-                        console.log(chalk.green(`  ✓ Configured properties`));
+                        console.log(chalk.gray(`    Properties to set: ${JSON.stringify(properties)}`));
+                        try {
+                            const updated = await this.client.updateProcessorProperties(
+                                processorId,
+                                properties,
+                                processorVersionMap[i]
+                            );
+                            processorVersionMap[i] = updated.revision.version;
+
+                            // Check validation status
+                            const validationStatus = updated.component.validationStatus;
+                            if (validationStatus === 'VALID') {
+                                console.log(chalk.green(`  ✓ Configured ${Object.keys(properties).length} properties (Valid)`));
+                            } else {
+                                const errors = updated.component.validationErrors || [];
+                                console.log(chalk.yellow(`  ⚠ Configured ${Object.keys(properties).length} properties (${validationStatus})`));
+                                for (const err of errors) {
+                                    console.log(chalk.yellow(`      - ${err}`));
+                                }
+                            }
+                        } catch (propError: any) {
+                            console.log(chalk.red(`  ✗ Failed to set properties: ${propError.response?.data?.message || propError.message}`));
+                            if (propError.response?.data) {
+                                console.log(chalk.gray(`    Response: ${JSON.stringify(propError.response.data)}`));
+                            }
+                            result.errors.push(`Failed to configure ${procDef.name}: ${propError.message}`);
+                        }
+                    } else {
+                        console.log(chalk.yellow(`  ⚠ No properties to set for ${procDef.name}`));
                     }
 
                     // Auto-terminate relationships if specified

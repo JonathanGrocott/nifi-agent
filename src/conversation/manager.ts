@@ -133,6 +133,20 @@ export class ConversationManager {
         console.log(chalk.cyan('═'.repeat(50)));
         console.log(chalk.gray(`\nFlow: ${flowDef.flow_name}\n`));
 
+        // Show flow summary
+        console.log(chalk.white('Processors:'));
+        for (const proc of flowDef.processors) {
+            console.log(chalk.gray(`  • ${proc.name} (${proc.type})`));
+            if (proc.properties && Object.keys(proc.properties).length > 0) {
+                for (const [key, value] of Object.entries(proc.properties)) {
+                    console.log(chalk.gray(`      ${key}: ${value}`));
+                }
+            } else {
+                console.log(chalk.yellow(`      (no properties configured)`));
+            }
+        }
+        console.log('');
+
         const confirm = readlineSync.question(
             chalk.yellow('Create this flow in NiFi? (yes/no): ')
         );
